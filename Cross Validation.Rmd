@@ -1,0 +1,160 @@
+---
+title: "laplacean"
+author: "Pei Hsin Lin"
+date: "7/13/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(ggplot2)
+library(shape)
+#library(brainGraph)
+library(parallel)
+library(dplyr)
+library(rdd)
+
+library(graphsim) # need to compuate laplacean matrix
+library(igraph) # need to compuate laplacean matrix
+
+networkcal<-function(tmpmat, num.cores=16, mcmethod='BY'){
+    pmat=do.call(cbind, mclapply(1:ncol(tmpmat),function(k)apply(tmpmat, 2, function(xx)cor.test(xx, tmpmat[,k])$p.value), mc.cores=num.cores))
+  lmat=matrix(0, ncol(tmpmat), ncol(tmpmat))
+  lmat[lower.tri(lmat)]<-as.numeric(p.adjust(pmat[lower.tri(pmat)], method=mcmethod)<0.05)
+  lmat=lmat+t(lmat)
+  return(lmat)
+}
+```
+
+
+
+# Data processing
+
+* Compute sliding-window-based functional connectivity: read power parcellation (264 locations), we may exclude cerebellum later
+
+* use task-activation removed matrix reasoning fMRI data
+
+```{r, eval=FALSE}
+filelist = list.files(
+  '/Volumes/promise_p/CRRANN/derivatives/Parcelled_TS/power_ts/matreas_residual',
+  pattern='.txt', full.name=TRUE)
+
+matreas=data.frame(Sub.ID = as.numeric(substr(filelist,83,86)),
+                   filelist=filelist) %>%
+  left_join(., read.csv('/Users/seonjoolee/Library/CloudStorage/GoogleDrive-seonjoo.lee@nyspi.columbia.edu/My\ Drive/Collaboration/Yaakov/data/RN_CR_Data_Part_1_ver_2.6.csv')[,c(1:10,93:96)]) %>%
+  left_join(., read.csv('/Users/seonjoolee/Library/CloudStorage/GoogleDrive-seonjoo.lee@nyspi.columbia.edu/My\ Drive/Collaboration/Yaakov/data/RN_CR_Data_Part_2_ver_2.6.csv')) 
+
+ts = mclapply(matreas$filelist,
+            function(str)read.table(str), mc.cores=16)
+
+sfc = lapply(ts, function(obj)networkcal(obj, mcmethod='bonferroni'))
+save(ts, matreas, sfc, file='../Data/CRRANN_matrisreasoning_residual_n293.Rdat')
+```
+
+## Static FC {.tabset}
+
+```{r}
+load('/Users/lin/Desktop/CRRANN_matrisreasoning_residual_n293.Rdat')
+
+
+
+# convert graph Laplacian
+
+sfc.laplacian=mclapply(sfc, 
+                       function(obj)make_laplacian_adjmat(obj, directed = FALSE), mc.cores=16)
+
+# normalized laplacian
+sfc.laplacian.norm=mclapply(sfc.laplacian, 
+                       function(obj)obj/sum(diag(obj)), mc.cores=16)
+
+# Nadaraya–Watson estimator 
+
+# since laplacian is symmetric, only take the lower triangular matrix
+
+sfc.laplacian.tmpmat=do.call(rbind, lapply(sfc.laplacian.norm,function(xx)xx[lower.tri(xx, diag=TRUE)] ))
+
+sfc.laplacian.tmpmat.c=scale(sfc.laplacian.tmpmat)
+```
+
+##bandwidth selection
+```{r}
+
+   
+CV_A<-function(bw, fold, var, df){
+            if(!is.numeric(df[[var]]))
+            sapply(bw,function(x) {
+              
+            sapply(fold,function(y)
+           {
+            k=length(1:10)
+            set.seed(2022)
+            sample.size=nrow(df)
+            a=matrix(NA,length(2:15),length(1:10))
+            cv_lab = sample(sample.size,sample.size,replace=F) %% k
+            ageeval=seq(min(df[[var]]),max(df[[var]]),1)
+            w_val = which(cv_lab==(y-1))
+            tr = df[-w_val,]
+            val= df[w_val,]
+            tmpkmat<-do.call(cbind,
+                               lapply(ageeval,function(ss)kernelwts(tr[[var]],ss,x, kernel = "tricube")))
+            estimates<-(t(tmpkmat) %*% sfc.laplacian.tmpmat.c[-w_val,])
+            resid<-((estimates[val[[var]]-(min(df[[var]]-1)),] - sfc.laplacian.tmpmat.c[w_val,]))
+            a[x-1,y] = mean(resid*resid)
+              
+              })
+              
+            }) 
+                else if(
+                  
+            is.numeric(df[[var]])){
+            sapply(bw,function(x){
+              
+            sapply(fold,function(y)
+                      {
+             df$var = df[,var]
+             k=length(1:10)
+             set.seed(2022)
+             sample.size=nrow(df)
+             a=matrix(NA,length(2:15),length(1:10))
+             df<-within(df , Unique_ID<- as.numeric(factor(paste(var))))
+             seq1<-df %>%
+             distinct(var) %>%
+             pull(var) %>%
+             as.numeric %>%
+               sort
+             cv_lab = sample(sample.size,sample.size,replace=F) %% k
+             w_val = which(cv_lab==(y-1))
+             tr = df[-w_val,]
+             val= df[w_val,]
+             tmpkmat<-do.call(cbind,
+                               lapply(seq1,function(ss)kernelwts(tr[[var]],ss,x, kernel = "tricube")))
+             estimates<-(t(tmpkmat) %*% sfc.laplacian.tmpmat.c[-w_val,])
+             resid<-((estimates[val$Unique_ID,]- sfc.laplacian.tmpmat.c[w_val,]))
+             a[x-1,y] = mean(resid*resid)
+              
+             })
+             }) 
+             }
+             }
+```
+
+```{r}
+
+cv1<-CV_A(2:15,1:10,"Age",matreas)
+sumcv<-colSums(cv1)
+plot(x=2:15, y=sumcv, type="b", lwd=3, col="blue", xlab="Age Smoothing bandwidth", ylab="CV MSE")
+cv2<-CV_A(seq(4,13,0.5),1:10,"NPReasoning",matreas)
+sumcv2<-colSums(cv2)
+plot(x=2:15, y=sumcv2, type="b", lwd=3, col="blue", xlab="NPReasoning Smoothing bandwidth", ylab="CV MSE")
+cv3<-CV_A(seq(4,13,0.5),1:10,"NPMemory",matreas)
+sumcv3<-colSums(cv3)
+plot(x=2:15, y=sumcv3, type="b", lwd=3, col="blue", xlab="NPMemory Smoothing bandwidth", ylab="CV MSE")
+cv4<-CV_A(seq(4,13,0.5),1:10,"NPVocab",matreas)
+sumcv4<-colSums(cv4)
+plot(x=2:15, y=sumcv4, type="b", lwd=3, col="blue", xlab="NPVocab Smoothing bandwidth", ylab="CV MSE")
+cv5<-CV_A(seq(4,13,0.5),1:10,"NPSpeed_attention",matreas)
+sumcv5<-colSums(cv5)
+plot(x=2:15, y=sumcv5, type="b", lwd=3, col="blue", xlab="NPSpeed_attention Smoothing bandwidth", ylab="CV MSE")
+```
+
